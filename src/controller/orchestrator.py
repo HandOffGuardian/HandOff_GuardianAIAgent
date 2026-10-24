@@ -8,6 +8,7 @@ are implemented. Component methods are injected and are expected to expose
 from __future__ import annotations
 
 from collections.abc import Mapping
+from copy import deepcopy
 from typing import Any
 
 
@@ -74,7 +75,9 @@ class Orchestrator:
         if failed:
             return self._report(result)
         claims = claims_response.get("claims") if isinstance(claims_response, Mapping) else claims_response
-        if not isinstance(claims, list) or any(not isinstance(claim, Mapping) for claim in claims):
+        if not isinstance(claims, list) or any(
+            not isinstance(claim, Mapping) or not claim for claim in claims
+        ):
             self._malformed(result, "claim_extractor")
             return self._report(result)
         result["claims"] = claims
@@ -92,7 +95,10 @@ class Orchestrator:
         if (
             not isinstance(evidence_response, Mapping)
             or not isinstance(evidence_response.get("evidence"), list)
-            or any(not isinstance(item, Mapping) for item in evidence_response["evidence"])
+            or any(
+                not isinstance(item, Mapping) or not item
+                for item in evidence_response["evidence"]
+            )
         ):
             self._malformed(result, "evidence_agent")
             return self._report(result)
@@ -194,9 +200,10 @@ class Orchestrator:
 
     def _report(self, result: dict[str, Any]) -> dict[str, Any]:
         try:
-            report = self.reporter.report(result)
-            result["report"] = report
-            result["report_status"] = "success"
+            # The reporter is a component boundary: it receives an isolated
+            # snapshot so its mutations cannot affect the decision or evidence.
+            reporter_input = deepcopy(result)
+            report = self.reporter.report(reporter_input)
         except Exception as exc:  # do not turn reporting errors into a disposition change
             result["report_status"] = "failed"
             result["diagnostics"].append(
@@ -206,4 +213,26 @@ class Orchestrator:
                     "exception_type": type(exc).__name__,
                 }
             )
+            return result
+
+        if not isinstance(report, Mapping) or not report:
+            result["report_status"] = "failed"
+            result["diagnostics"].append(
+                {"component": "reporter", "error": "malformed_report_output"}
+            )
+            return result
+
+        try:
+            result["report"] = deepcopy(dict(report))
+        except Exception as exc:
+            result["report_status"] = "failed"
+            result["diagnostics"].append(
+                {
+                    "component": "reporter",
+                    "error": "malformed_report_output",
+                    "exception_type": type(exc).__name__,
+                }
+            )
+            return result
+        result["report_status"] = "success"
         return result
