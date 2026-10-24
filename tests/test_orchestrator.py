@@ -49,7 +49,8 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["evidence"][0]["provenance"], {"provider": "fixture", "record": 4})
         self.components.claim.extract.assert_called_once_with(request=sample_request())
         self.components.evaluator.evaluate.assert_called_once()
-        self.components.reporter.report.assert_called_once_with(result)
+        self.components.reporter.report.assert_called_once()
+        self.assertIsNot(self.components.reporter.report.call_args.args[0], result)
         self.assertEqual(result["report_status"], "success")
 
     def test_missing_empty_or_conflicting_evidence_never_clears(self):
@@ -111,6 +112,37 @@ class OrchestratorTests(unittest.TestCase):
                 self.assertEqual(result["disposition"], "ESCALATE")
                 self.assertTrue(any(item["error"] == "malformed_component_output" for item in result["diagnostics"]))
 
+    def test_empty_and_mixed_malformed_claim_records_never_reach_evaluator(self):
+        cases = [
+            [{}],
+            [{"claim_id": "C1"}, {}],
+        ]
+        for claims in cases:
+            with self.subTest(claims=claims):
+                components = make_components()
+                components.claim.extract.return_value = {"claims": claims}
+                result = make_orchestrator(components).run(sample_request())
+                self.assertEqual(result["disposition"], "ESCALATE")
+                components.evaluator.evaluate.assert_not_called()
+
+    def test_empty_and_mixed_malformed_evidence_records_never_reach_evaluator(self):
+        valid_record = {"evidence_id": "E2", "provenance": {"source": "fixture"}}
+        cases = [
+            [{}],
+            [valid_record, {}],
+        ]
+        for evidence_records in cases:
+            with self.subTest(evidence=evidence_records):
+                components = make_components()
+                components.evidence.collect.return_value = {
+                    "evidence": evidence_records,
+                    "missing_mandatory": [],
+                    "conflicts": [],
+                }
+                result = make_orchestrator(components).run(sample_request())
+                self.assertEqual(result["disposition"], "ESCALATE")
+                components.evaluator.evaluate.assert_not_called()
+
     def test_reporter_failure_is_recorded_and_does_not_clear_escalation(self):
         self.components.evaluator.evaluate.return_value["decision"] = "ESCALATE"
         self.components.reporter.report.side_effect = RuntimeError("report failed")
@@ -124,6 +156,48 @@ class OrchestratorTests(unittest.TestCase):
         result = self.run_orchestrator()
         self.assertEqual(result["disposition"], "CLEAR")
         self.assertEqual(result["report_status"], "failed")
+
+    def test_reporter_mutations_cannot_change_escalated_result(self):
+        self.components.evaluator.evaluate.return_value["decision"] = "ESCALATE"
+
+        def mutate_report_input(payload):
+            payload["disposition"] = "CLEAR"
+            payload["evidence"][0]["evidence_id"] = "altered"
+            payload["evaluation"]["decision"] = "CLEAR"
+            return {"report_id": "R1"}
+
+        self.components.reporter.report.side_effect = mutate_report_input
+        result = self.run_orchestrator()
+
+        self.assertEqual(result["disposition"], "ESCALATE")
+        self.assertEqual(result["evidence"][0]["evidence_id"], "E1")
+        self.assertEqual(result["evaluation"]["decision"], "ESCALATE")
+        self.assertEqual(result["report_status"], "success")
+
+    def test_reporter_mutation_then_exception_cannot_change_authoritative_data(self):
+        self.components.evaluator.evaluate.return_value["decision"] = "ESCALATE"
+
+        def mutate_then_raise(payload):
+            payload["disposition"] = "CLEAR"
+            payload["evidence"][0]["provenance"]["record"] = "altered"
+            payload["evaluation"]["decision"] = "CLEAR"
+            raise RuntimeError("report failed")
+
+        self.components.reporter.report.side_effect = mutate_then_raise
+        result = self.run_orchestrator()
+
+        self.assertEqual(result["disposition"], "ESCALATE")
+        self.assertEqual(result["evidence"][0]["provenance"]["record"], 4)
+        self.assertEqual(result["evaluation"]["decision"], "ESCALATE")
+        self.assertEqual(result["report_status"], "failed")
+        self.assertEqual(result["diagnostics"][-1]["error"], "reporting_failure")
+
+    def test_malformed_report_output_is_recorded(self):
+        self.components.reporter.report.return_value = []
+        result = self.run_orchestrator()
+        self.assertEqual(result["disposition"], "CLEAR")
+        self.assertEqual(result["report_status"], "failed")
+        self.assertEqual(result["diagnostics"][-1]["error"], "malformed_report_output")
 
 
 if __name__ == "__main__":
