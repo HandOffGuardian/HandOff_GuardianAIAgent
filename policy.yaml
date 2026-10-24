@@ -1,0 +1,176 @@
+# Handoff Guardian - Evaluator policy.
+# STATUS: PROVISIONAL. Every threshold, source name and category below is a
+# placeholder proposal and needs team approval (see "Open policy questions"
+# in the Evaluator completion report). Configuration only - no logic here.
+
+policy_version: "0.1.0-draft"
+
+# Timestamp semantics: freshness is measured from `EvidenceRecord.timestamp`
+# (the time the source record was observed/last updated, timezone-aware
+# ISO-8601 or datetime) to the Evaluator's injected clock. Naive timestamps
+# and timestamps more than `clock_skew_tolerance_seconds` in the future are
+# rejected as invalid evidence (never treated as fresh).
+clock_skew_tolerance_seconds: 300
+
+# Severity -> risk-score weight. Weights feed the score only; they never
+# decide CLEAR/ESCALATE (that is `blocking` on reason codes below).
+severities:
+  critical: { weight: 40 }
+  high:     { weight: 25 }
+  medium:   { weight: 10 }
+  low:      { weight: 3 }
+  info:     { weight: 0 }
+
+# Stable reason codes. `blocking: true` means any finding with this code forces
+# ESCALATE regardless of the risk score.
+reason_codes:
+  MISSING_REQUIRED_EVIDENCE:
+    severity: high
+    blocking: true
+    description: No evidence record exists for a mandatory source/category.
+  SOURCE_STATUS_MISSING:
+    severity: high
+    blocking: true
+    description: A mandatory source reported no status, so availability is unknown.
+  SOURCE_UNAVAILABLE:
+    severity: high
+    blocking: true
+    description: A mandatory source was unavailable or timed out.
+  SOURCE_INVALID:
+    severity: high
+    blocking: true
+    description: A mandatory source returned an error or invalid data.
+  STALE_EVIDENCE:
+    severity: high
+    blocking: true
+    description: All evidence for a mandatory source/category exceeds the freshness limit.
+  EVIDENCE_TIMESTAMP_INVALID:
+    severity: high
+    blocking: true
+    description: Evidence has a missing, naive, unparseable, or future timestamp.
+  MISSING_REQUIRED_CLAIM:
+    severity: high
+    blocking: true
+    description: No claim was provided for a requirement that needs one.
+  CLAIM_VALIDATION_FAILED:
+    severity: high
+    blocking: true
+    description: A claim in a required category failed validation.
+  CLAIM_VALIDATION_INCOMPLETE:
+    severity: high
+    blocking: true
+    description: A claim is unvalidated, has no supporting evidence, or has an unrecognised value.
+  UNKNOWN_EVIDENCE_REFERENCE:
+    severity: high
+    blocking: true
+    description: A claim cites an evidence ID that is not present in the input.
+  UNRESOLVED_CRITICAL_BLOCKER:
+    severity: critical
+    blocking: true
+    description: An open engineering blocker with critical severity exists.
+  UNRESOLVED_NONCRITICAL_BLOCKER:
+    severity: medium
+    blocking: false
+    description: An open engineering blocker below critical severity exists.
+  CRITICAL_CONFLICT_UNRESOLVED:
+    severity: critical
+    blocking: true
+    description: Sources disagree on a critical fact and policy precedence cannot resolve it.
+  CONFLICT_RESOLVED_BY_PRECEDENCE:
+    severity: info
+    blocking: false
+    description: Sources disagreed; the higher-precedence source decided the value.
+  MINOR_CONFLICT:
+    severity: low
+    blocking: false
+    description: Sources disagree on a non-critical fact.
+  INVALID_INPUT:
+    severity: critical
+    blocking: true
+    description: Evaluator input was malformed or incomplete.
+  POLICY_INVALID:
+    severity: critical
+    blocking: true
+    description: The policy could not be loaded or validated.
+  EVALUATOR_ERROR:
+    severity: critical
+    blocking: true
+    description: Unexpected internal error; safety could not be established.
+
+# Mandatory handoff requirements. Each needs, for every `required_sources`
+# entry: an AVAILABLE source status, at least one fresh evidence record in
+# `category`, and (if `require_claim`) at least one validated claim.
+requirements:
+  - id: REQ-ENGINEERING
+    category: engineering_status
+    description: Engineering issue status is established and fresh.
+    required_sources: [jira]
+    max_age_hours: 48
+    require_claim: true
+  - id: REQ-OWNERSHIP
+    category: ownership
+    description: Account ownership and handoff readiness are established and fresh.
+    required_sources: [crm]
+    max_age_hours: 168
+    require_claim: true
+
+# Source authority per category, highest authority first. A source not listed
+# has no authority (it can never win a conflict). Newest-record-wins is NOT used.
+source_precedence:
+  engineering_status: [jira, github]
+  ownership: [crm]
+
+# Engineering blocker handling.
+blockers:
+  category: engineering_status
+  claim_key: blocker_status
+  open_values: [open, unresolved, in_progress]
+  resolved_values: [resolved, closed, none]
+  critical_severities: [critical]
+  # Severity assumed for an open blocker claim that carries none (conservative).
+  default_severity: critical
+
+conflicts:
+  # Claim keys where any disagreement is critical.
+  critical_keys: [blocker_status]
+  # Claim severities that make a disagreement critical.
+  critical_severities: [critical]
+  # If false, a higher-precedence "resolved" can NOT override a lower-precedence
+  # critical open blocker; the conflict stays unresolved (ESCALATE).
+  allow_precedence_override_of_critical_blocker: false
+
+# Behaviour per reported source status. "pass" is only allowed for `available`.
+source_status_behavior:
+  available: pass
+  unavailable: SOURCE_UNAVAILABLE
+  timeout: SOURCE_UNAVAILABLE
+  error: SOURCE_INVALID
+  invalid: SOURCE_INVALID
+missing_source_status_code: SOURCE_STATUS_MISSING
+
+# Risk score = sum of severity weights over de-duplicated issues, capped at 100.
+# Not a probability. `blocking_floor` keeps blocked cases from looking low-risk;
+# it only raises the score and never affects the decision.
+scoring:
+  max_score: 100
+  blocking_floor: 50
+  levels:           # lower bound (inclusive) of each level, ascending
+    low: 0
+    medium: 25
+    high: 50
+    critical: 75
+
+# Bounded operational recovery. The Evaluator is stateless: the Planner passes
+# `retries_used`. RETRY is returned only when EVERY blocking finding has a code
+# listed here and retries_used < max_retries; otherwise ESCALATE. RETRY is not
+# a handoff decision and never approves clearance.
+retry:
+  max_retries: 1
+  retryable_reason_codes:
+    - SOURCE_UNAVAILABLE        # includes timeouts
+    - SOURCE_STATUS_MISSING
+    - MISSING_REQUIRED_EVIDENCE
+    - STALE_EVIDENCE
+
+# No exceptions are approved. Must stay empty until the team approves a schema.
+approved_exceptions: []
