@@ -65,12 +65,16 @@ class Orchestrator:
         ):
             result["diagnostics"].append({"component": "input", "error": "missing_or_invalid_required_field"})
             return self._report(result)
+        metadata = request.get("metadata", {})
+        if not isinstance(metadata, Mapping):
+            result["diagnostics"].append({"component": "input", "error": "malformed_metadata"})
+            return self._report(result)
 
         claims_response, failed = self._invoke(
             "claim_extractor",
-            lambda **kwargs: self.claim_extractor.extract(**kwargs),
+            lambda **kwargs: self.claim_extractor.extract(request=deepcopy(kwargs["request"])),
             result,
-            request=request,
+            request=dict(request),
         )
         if failed:
             return self._report(result)
@@ -84,11 +88,16 @@ class Orchestrator:
 
         evidence_response, failed = self._invoke(
             "evidence_agent",
-            lambda **kwargs: self.evidence_agent.collect(**kwargs),
+            lambda **kwargs: self.evidence_agent.collect(
+                account_id=kwargs["account_id"],
+                claims=deepcopy(kwargs["claims"]),
+                metadata=deepcopy(kwargs["metadata"]),
+            ),
             result,
             account_id=request["account_id"],
+            # Each stage gets a private copy; injected agents may mutate inputs.
             claims=claims,
-            metadata=request.get("metadata", {}),
+            metadata=dict(metadata),
         )
         if failed:
             return self._report(result)
@@ -118,11 +127,15 @@ class Orchestrator:
 
         evaluation_response, failed = self._invoke(
             "evaluator",
-            lambda **kwargs: self.evaluator.evaluate(**kwargs),
+            lambda **kwargs: self.evaluator.evaluate(
+                claims=deepcopy(kwargs["claims"]),
+                evidence_bundle=deepcopy(kwargs["evidence_bundle"]),
+                context=deepcopy(kwargs["context"]),
+            ),
             result,
             claims=claims,
             evidence_bundle=evidence_response,
-            context=request,
+            context=dict(request),
         )
         if failed:
             return self._report(result)

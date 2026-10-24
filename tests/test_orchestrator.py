@@ -192,6 +192,47 @@ class OrchestratorTests(unittest.TestCase):
         self.assertEqual(result["report_status"], "failed")
         self.assertEqual(result["diagnostics"][-1]["error"], "reporting_failure")
 
+    def test_stage_input_mutations_cannot_change_request_claims_or_evidence(self):
+        request = sample_request()
+
+        def mutate_request(request):
+            request["source_text"] = "changed"
+            return {"claims": [{"claim_id": "C1", "field": "amount", "claimed_value": "10"}]}
+
+        def mutate_evidence_inputs(account_id, claims, metadata):
+            claims[0]["claimed_value"] = "changed"
+            return {
+                "evidence": [{"evidence_id": "E1", "provenance": {"source": "fixture"}}],
+                "missing_mandatory": [], "conflicts": [],
+            }
+
+        def mutate_evaluator_inputs(claims, evidence_bundle, context):
+            claims[0]["claimed_value"] = "also changed"
+            evidence_bundle["evidence"][0]["evidence_id"] = "changed"
+            context["account_id"] = "changed"
+            return {
+                "decision": "CLEAR", "mandatory_satisfied": True,
+                "findings": [], "missing_mandatory": [], "conflicts": [],
+            }
+
+        self.components.claim.extract.side_effect = mutate_request
+        self.components.evidence.collect.side_effect = mutate_evidence_inputs
+        self.components.evaluator.evaluate.side_effect = mutate_evaluator_inputs
+        result = make_orchestrator(self.components).run(request)
+
+        self.assertEqual(request["source_text"], "Payment was 10.")
+        self.assertEqual(result["claims"][0]["claimed_value"], "10")
+        self.assertEqual(result["evidence"][0]["evidence_id"], "E1")
+        self.assertEqual(result["disposition"], "CLEAR")
+
+    def test_malformed_metadata_escalates_without_calling_agents(self):
+        request = sample_request()
+        request["metadata"] = []
+        result = make_orchestrator(self.components).run(request)
+        self.assertEqual(result["disposition"], "ESCALATE")
+        self.assertEqual(result["diagnostics"][0]["error"], "malformed_metadata")
+        self.components.claim.extract.assert_not_called()
+
     def test_malformed_report_output_is_recorded(self):
         self.components.reporter.report.return_value = []
         result = self.run_orchestrator()
