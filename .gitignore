@@ -2,7 +2,22 @@
 .env
 .env.*
 !.env.example
+
 # Python cache files
 __pycache__/
 *.py[cod]
 .pytest_cache/
+
+# Virtual environments
+.venv/
+venv/
+
+# Test and coverage artifacts
+.coverage
+htmlcov/
+
+# IDE and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
