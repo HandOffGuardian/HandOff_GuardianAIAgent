@@ -203,6 +203,7 @@ def _claim_evidence_matches(claim: Claim, evidence: EvidenceRecord) -> bool:
         "engineering_status": {"blocker_status", "engineering_status", "production_status"},
         "production_status": {"blocker_status", "engineering_status", "production_status"},
         "ownership": {"ownership"},
+        "owner": {"owner", "ownership"},
         "primary_contact": {"primary_contact"},
         "account_handler": {"account_handler"},
         "implementation_owner": {"implementation_owner"},
@@ -253,6 +254,7 @@ def validate_claims_against_evidence(
                 "production_status",
             },
             "ownership": {"ownership"},
+            "owner": {"owner", "ownership"},
             "primary_contact": {"primary_contact"},
             "account_handler": {"account_handler"},
             "implementation_owner": {"implementation_owner"},
@@ -376,18 +378,8 @@ class EvaluatorAdapter:
                 if bundle_statuses is not None:
                     source_statuses = bundle_statuses
                 else:
-                    # Infer available statuses for sources present in collected evidence
-                    inferred_sources: set[str] = set()
-                    for item in evidence or []:
-                        raw_src = getattr(item, "source", None)
-                        if raw_src is None and isinstance(item, Mapping):
-                            raw_src = item.get("source") or item.get("source_id")
-                        if raw_src:
-                            inferred_sources.add(normalize_source_name(str(raw_src)))
-                    source_statuses = [
-                        SourceStatus(source=s, status="available")
-                        for s in sorted(inferred_sources)
-                    ]
+                    # Evidence presence cannot establish provider health/status.
+                    source_statuses = []
 
         if source_statuses is None and statuses is not None:
             source_statuses = statuses

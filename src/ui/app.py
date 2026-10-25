@@ -20,12 +20,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from src.controller.orchestrator import Orchestrator
-from src.evaluator import EvaluatorAdapter
-from src.evidence.agent import EvidenceAgent
-from src.evidence.providers.mock_provider import MockEvidenceProvider
-from src.extractor.claim_extractor import ClaimExtractor
-from src.reporter.report import Reporter
+from src.controller.application import build_orchestrator
 
 
 st.set_page_config(
@@ -91,17 +86,6 @@ st.markdown(
     """,
     unsafe_allow_html=True,
 )
-
-
-def build_orchestrator() -> Orchestrator:
-    """Build the pipeline using the existing project components."""
-    return Orchestrator(
-        claim_extractor=ClaimExtractor(),
-        evidence_agent=EvidenceAgent(MockEvidenceProvider()),
-        evaluator=EvaluatorAdapter(),
-        reporter=Reporter(),
-    )
-
 
 
 def json_safe(value):
@@ -178,8 +162,6 @@ if page == "Investigate":
                 with st.spinner("Running the investigation pipeline..."):
                     orchestrator = build_orchestrator()
 
-                    # Keep the invocation explicit so we can adapt it to
-                    # the actual Orchestrator API if its signature differs.
                     result = orchestrator.run(
                         {
                             "handoff_id": handoff_id.strip() or account_id.strip(),
@@ -198,7 +180,30 @@ if page == "Investigate":
     if result is not None:
         st.divider()
         st.subheader("Investigation Results")
-        st.json(result)
+        status = result.get("disposition", "ESCALATE")
+        evaluation = result.get("evaluation") or {}
+        report = result.get("report") or {}
+        score = evaluation.get("risk_score", report.get("risk_score", 0))
+        if status == "CLEAR":
+            st.success(f"Status: {status} (Risk Score: {score}/100)")
+        else:
+            st.error(f"Status: {status} (Risk Score: {score}/100)")
+        st.markdown("### Investigation Summary")
+        st.write(report.get("summary", "No report was produced."))
+        findings = evaluation.get("findings", [])
+        if findings:
+            st.markdown("### Findings")
+            st.write(json_safe(findings))
+        if result.get("evidence"):
+            with st.expander("Collected evidence and provenance"):
+                st.json(json_safe(result["evidence"]))
+        if result.get("diagnostics"):
+            st.markdown("### Execution diagnostics")
+            for diagnostic in result["diagnostics"]:
+                st.warning(f"{diagnostic.get('component')}: {diagnostic.get('error')}")
+        st.markdown("### Recommended Actions")
+        for recommendation in report.get("recommendations", ["Perform manual review."]):
+            st.write(f"- {recommendation}")
 
 elif page == "About":
     st.header("About Handoff Guardian")

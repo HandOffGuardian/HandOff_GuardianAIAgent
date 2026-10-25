@@ -89,6 +89,7 @@ def test_collect_preserves_provenance_and_serializes_timestamp() -> None:
     assert evidence["value"] == "blocked"
     assert evidence["updated_at"] == timestamp.isoformat()
     assert evidence["excerpt"] == "Example source excerpt"
+    assert result["source_statuses"] == []
     assert result["mandatory_satisfied"] is None
 
 

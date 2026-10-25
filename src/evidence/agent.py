@@ -61,6 +61,9 @@ class EvidenceAgent:
 
         return {
             "evidence": [self._to_dict(record) for record in records],
+            # Providers must report explicit per-source statuses to let the
+            # Evaluator establish availability. Do not infer them from records.
+            "source_statuses": [],
             "missing_mandatory": [],
             "conflicts": [],
             "mandatory_satisfied": None,

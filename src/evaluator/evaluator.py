@@ -1,4 +1,4 @@
-﻿"""Evaluator entry point: claims + evidence + source statuses -> CLEAR/ESCALATE.
+"""Evaluator entry point: claims + evidence + source statuses -> CLEAR/ESCALATE.
 
 Safety boundary: CLEAR is returned only when no blocking finding exists. RETRY
 is operational recovery for temporary failures only (see policy `retry`) and is
@@ -28,6 +28,13 @@ from .rules import (
     resolve_conflicts,
 )
 Clock = Callable[[], datetime]
+
+CATEGORY_ALIASES = {"engineering_status": "engineering_status", "production_status": "engineering_status", "blocker_status": "engineering_status", "ownership": "ownership", "primary_contact": "ownership", "account_handler": "ownership"}
+
+def normalize_category(category: Any, key: Any = None) -> str:
+    raw = str(category).strip().lower() if category is not None else ""
+    field = str(key).strip().lower() if key is not None else ""
+    return CATEGORY_ALIASES.get(raw, CATEGORY_ALIASES.get(field, raw or field or "unknown"))
 
 SOURCE_ALIASES: dict[str, str] = {
     "engineering ticket": "jira",
@@ -72,7 +79,7 @@ def _normalize_claim(c: Any) -> Any:
         claim_id = c.get("claim_id")
         key = c.get("key") or c.get("field")
         val = c.get("value") if c.get("value") is not None else c.get("claimed_value")
-        category = c.get("category") or "engineering_status"
+        category = normalize_category(c.get("category"), key)
         validation_status = c.get("validation_status") or "unvalidated"
         raw_ev = c.get("evidence_ids")
         if raw_ev is None:
@@ -117,7 +124,7 @@ def _normalize_evidence(e: Any) -> Any:
         return EvidenceRecord(
             evidence_id=str(e.evidence_id),
             source=src,
-            category=str(e.field),
+            category=normalize_category(None, getattr(e, "field", None)),
             timestamp=ts,
             value=str(raw_value) if raw_value is not None else None,
             account_id=(
@@ -130,7 +137,7 @@ def _normalize_evidence(e: Any) -> Any:
         evidence_id = e.get("evidence_id")
         raw_source = e.get("source") or e.get("source_id") or ""
         norm_source = normalize_source_name(str(raw_source))
-        category = e.get("category") or e.get("field") or "engineering_status"
+        category = normalize_category(e.get("category"), e.get("field"))
 
         ts = (
             e.get("updated_at")
@@ -200,7 +207,7 @@ def _validate_inputs(claims: object, evidence: object, statuses: object) -> List
     if problems:
         return problems
     for c in claims:  # type: ignore[union-attr]
-        if not (isinstance(c.claim_id, str) and c.claim_id and isinstance(c.category, str)
+        if not (isinstance(c.claim_id, str) and c.claim_id and isinstance(c.category, str) and c.category.strip() and c.category != "unknown"
                 and isinstance(c.key, str) and isinstance(c.value, str)
                 and isinstance(c.validation_status, str)
                 and isinstance(c.evidence_ids, (list, tuple))
@@ -264,18 +271,9 @@ class Evaluator:
                 if bundle_statuses is not None:
                     source_statuses = bundle_statuses
                 else:
-                    # Infer available statuses for sources present in collected evidence
-                    inferred_sources: set[str] = set()
-                    for item in evidence or []:
-                        raw_src = getattr(item, "source", None)
-                        if raw_src is None and isinstance(item, Mapping):
-                            raw_src = item.get("source") or item.get("source_id")
-                        if raw_src:
-                            inferred_sources.add(normalize_source_name(str(raw_src)))
-                    source_statuses = [
-                        SourceStatus(source=s, status="available")
-                        for s in sorted(inferred_sources)
-                    ]
+                    # A record proves only that a record was returned; it does
+                    # not prove that the mandatory provider completed a check.
+                    source_statuses = []
 
         # Normalize dicts if passed
         if isinstance(claims, (list, tuple)):
@@ -378,10 +376,9 @@ class Evaluator:
         conflicts: List[Any] = [
             f.description for f in ordered_t if "CONFLICT" in f.reason_code
         ]
-        mandatory_satisfied = (len(missing_mandatory) == 0 and not any(
-            f.blocking for f in ordered_t
-            if f.reason_code in ("MISSING_REQUIRED_EVIDENCE", "MISSING_REQUIRED_CLAIM", "SOURCE_STATUS_MISSING")
-        ))
+        # A requirement is not satisfied if any blocking finding remains,
+        # including invalid input, incomplete validation, or provider failure.
+        mandatory_satisfied = not any(f.blocking for f in ordered_t)
         contract_findings = tuple(to_contract_finding(f) for f in ordered_t)
         return EvaluationResult(
             decision,

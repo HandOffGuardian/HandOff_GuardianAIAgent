@@ -525,7 +525,7 @@ def test_orchestrator_missing_sources_never_default_to_available():
     # No source_statuses provided in bundle
     evidence_bundle = {
         "evidence": [
-            {"evidence_id": "E-JIRA-1", "source_id": "jira", "timestamp": hours_ago(2)},
+            {"evidence_id": "E-JIRA-1", "source_id": "jira", "category": "engineering_status", "timestamp": hours_ago(2)},
         ],
     }
     r = evaluator.evaluate(claims=claims, evidence_bundle=evidence_bundle, retries_used=1)

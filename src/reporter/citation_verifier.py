@@ -1,25 +1,33 @@
-"""
-citation_verify.py
-Purpose: Ensure all evidence citations in the final report tie back to actual source records.
-"""
+"""Verify report evidence references against the Evidence Agent bundle."""
 
 
 class CitationVerifier:
     @staticmethod
     def verify_citations(report: dict, evidence_bundle: dict) -> bool:
-        """
-        Validates that all evidence IDs cited in conflicts exist in the retrieved evidence bundle.
-        """
-        if not evidence_bundle or "records" not in evidence_bundle:
-            return True
+        if not isinstance(report, dict) or not isinstance(evidence_bundle, dict):
+            return False
 
-        valid_record_ids = {rec.get("record_id") for rec in evidence_bundle.get("records", [])}
-        conflicts = report.get("conflicts", [])
+        records = evidence_bundle.get("evidence", evidence_bundle.get("records"))
+        if not isinstance(records, list):
+            return False
+        record_ids = set()
+        for record in records:
+            if not isinstance(record, dict):
+                return False
+            record_id = record.get("evidence_id", record.get("record_id"))
+            if isinstance(record_id, str) and record_id:
+                record_ids.add(record_id)
 
-        for conflict in conflicts:
-            cited_ids = conflict.get("evidence_ids", [])
-            for cid in cited_ids:
-                if cid not in valid_record_ids:
+        for section in ("findings", "conflicts"):
+            entries = report.get(section, [])
+            if not isinstance(entries, list):
+                return False
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                cited_ids = entry.get("evidence_ids", [])
+                if not isinstance(cited_ids, (list, tuple)):
                     return False
-
+                if any(not isinstance(item, str) or item not in record_ids for item in cited_ids):
+                    return False
         return True
