@@ -563,3 +563,42 @@ def test_retry_both_return_code_and_transient_exception():
     assert exc_info.value.safe_to_retry is True
 
 
+
+def test_evidence_conflict_excludes_unrelated_renewal_date():
+    from src.evaluator.rules import detect_evidence_conflicts
+
+    policy = load_policy()
+    evidence = [
+        EvidenceRecord(
+            evidence_id="EV001",
+            source="crm",
+            category="renewal_date",
+            timestamp="2026-10-01T09:00:00+00:00",
+            value="2026-11-30",
+            account_id="ACC001",
+        ),
+        EvidenceRecord(
+            evidence_id="EV002",
+            source="jira",
+            category="production_status",
+            timestamp="2026-10-02T14:30:00+00:00",
+            value="blocked",
+            account_id="ACC001",
+        ),
+        EvidenceRecord(
+            evidence_id="EV003",
+            source="chat",
+            category="production_status",
+            timestamp="2026-10-03T12:15:00+00:00",
+            value="ready",
+            account_id="ACC001",
+        ),
+    ]
+
+    findings = detect_evidence_conflicts(policy, evidence)
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.reason_code == "CRITICAL_CONFLICT_UNRESOLVED"
+    assert set(finding.evidence_ids) == {"EV002", "EV003"}
+    assert "renewal_date" not in finding.description

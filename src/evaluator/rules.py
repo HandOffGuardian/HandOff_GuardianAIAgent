@@ -226,3 +226,87 @@ def check_blockers(policy: Policy, trusted: Sequence[Claim], suppressed: Set[str
                 f"Claim '{c.claim_id}' has unrecognised blocker value {c.value!r}.",
                 c.evidence_ids, f"claim:{c.claim_id}"))
     return findings
+
+def detect_evidence_conflicts(
+    policy: Policy,
+    evidence: Sequence[EvidenceRecord],
+) -> List[Finding]:
+    """Detect contradictory values reported for the same account and fact.
+
+    This check reports disagreements; it does not decide which source is
+    authoritative or treat either record as validated.
+    """
+    groups: Dict[Tuple[str, str, str], List[EvidenceRecord]] = defaultdict(list)
+
+    for record in evidence:
+        if record.value is None or not record.value.strip():
+            continue
+
+        account = norm(record.account_id or "")
+        category = norm(record.category)
+        source = norm(record.source)
+
+        # Avoid comparing unrelated accounts or records without a known account.
+        if not account:
+            continue
+
+        # Normalize common field aliases so equivalent fields are compared.
+        field_aliases = {
+            "production_status": "engineering_status",
+            "blocker_status": "engineering_status",
+            "engineering_status": "engineering_status",
+            "primary_contact": "ownership",
+            "account_handler": "ownership",
+            "ownership": "ownership",
+        }
+        fact = field_aliases.get(category, category)
+
+        # Source is retained in the record, but intentionally excluded from
+        # the group key so disagreements across sources can be detected.
+        groups[(account, fact, "value")].append(record)
+
+    findings: List[Finding] = []
+
+    for (account, fact, _), records in sorted(groups.items()):
+        values: Dict[str, List[EvidenceRecord]] = defaultdict(list)
+
+        for record in records:
+            values[norm(record.value)].append(record)
+
+        if len(values) < 2:
+            continue
+
+        evidence_ids = [
+            record.evidence_id
+            for record in records
+        ]
+
+        # Engineering status conflicts are critical because one source may
+        # report a blocker while another suggests readiness.
+        critical = fact == norm(policy.blocker_category)
+
+        if critical:
+            code = "CRITICAL_CONFLICT_UNRESOLVED"
+        else:
+            code = "MINOR_CONFLICT"
+
+        findings.append(
+            make_finding(
+                policy,
+                code,
+                "EVIDENCE_CONFLICT",
+                (
+                    f"Conflicting evidence for account '{account}', "
+                    f"fact '{fact}': "
+                    + "; ".join(
+                        f"{record.source} reported {record.value!r} "
+                        f"(evidence {record.evidence_id})"
+                        for record in records
+                    )
+                ),
+                evidence_ids=evidence_ids,
+                subject=f"evidence-conflict:{account}:{fact}",
+            )
+        )
+
+    return findings

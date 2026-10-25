@@ -1,4 +1,4 @@
-"""Evaluator entry point: claims + evidence + source statuses -> CLEAR/ESCALATE.
+﻿"""Evaluator entry point: claims + evidence + source statuses -> CLEAR/ESCALATE.
 
 Safety boundary: CLEAR is returned only when no blocking finding exists. RETRY
 is operational recovery for temporary failures only (see policy `retry`) and is
@@ -18,9 +18,15 @@ from .models import (Claim, Decision, EvaluationResult, EvaluatorTransientError,
                      EvidenceRecord, Finding, SourceStatus)
 from .policy import Policy, PolicyError, load_policy
 from .risk_scoring import calculate_risk
-from .rules import (check_blockers, check_claims, check_evidence,
-                    check_source_status, make_finding, resolve_conflicts)
-
+from .rules import (
+    check_blockers,
+    check_claims,
+    check_evidence,
+    check_source_status,
+    detect_evidence_conflicts,
+    make_finding,
+    resolve_conflicts,
+)
 Clock = Callable[[], datetime]
 
 SOURCE_ALIASES: dict[str, str] = {
@@ -67,7 +73,7 @@ def _normalize_claim(c: Any) -> Any:
         key = c.get("key") or c.get("field")
         val = c.get("value") if c.get("value") is not None else c.get("claimed_value")
         category = c.get("category") or "engineering_status"
-        validation_status = c.get("validation_status") or "validated"
+        validation_status = c.get("validation_status") or "unvalidated"
         raw_ev = c.get("evidence_ids")
         if raw_ev is None:
             raw_single = c.get("evidence_id")
@@ -96,33 +102,59 @@ def _normalize_claim(c: Any) -> Any:
 
 
 def _normalize_evidence(e: Any) -> Any:
+    """Normalize evidence while preserving its original content and provenance."""
     if isinstance(e, EvidenceRecord):
         return e
+
     if hasattr(e, "updated_at") and hasattr(e, "evidence_id"):
-        # Shared ContractEvidence object
         ts = e.updated_at
         src = normalize_source_name(getattr(e, "source", ""))
+
+        raw_value = getattr(e, "value", None)
+        raw_account_id = getattr(e, "account_id", None)
+        raw_excerpt = getattr(e, "excerpt", None)
+
         return EvidenceRecord(
             evidence_id=str(e.evidence_id),
             source=src,
-            category="engineering_status",
+            category=str(e.field),
             timestamp=ts,
+            value=str(raw_value) if raw_value is not None else None,
+            account_id=(
+                str(raw_account_id) if raw_account_id is not None else None
+            ),
+            excerpt=str(raw_excerpt) if raw_excerpt is not None else None,
         )
+
     if isinstance(e, Mapping):
         evidence_id = e.get("evidence_id")
         raw_source = e.get("source") or e.get("source_id") or ""
         norm_source = normalize_source_name(str(raw_source))
-        category = e.get("category") or "engineering_status"
-        # Support updated_at from shared contract, falling back to timestamp
-        ts = e.get("updated_at") if e.get("updated_at") is not None else e.get("timestamp")
+        category = e.get("category") or e.get("field") or "engineering_status"
+
+        ts = (
+            e.get("updated_at")
+            if e.get("updated_at") is not None
+            else e.get("timestamp")
+        )
+
+        raw_value = e.get("value")
+        raw_account_id = e.get("account_id")
+        raw_excerpt = e.get("excerpt")
+
         return EvidenceRecord(
             evidence_id=str(evidence_id) if evidence_id is not None else "",
             source=norm_source,
             category=str(category),
             timestamp=ts,
+            value=str(raw_value) if raw_value is not None else None,
+            account_id=(
+                str(raw_account_id) if raw_account_id is not None else None
+            ),
+            excerpt=str(raw_excerpt) if raw_excerpt is not None else None,
         )
-    return e
 
+    return e
 
 def _normalize_status(s: Any) -> Any:
     if isinstance(s, SourceStatus):
@@ -308,9 +340,17 @@ class Evaluator:
                 if c.claim_id not in seen_claim_ids:
                     seen_claim_ids.add(c.claim_id)
                     trusted.append(c)
+
+
+        # Inspect raw evidence independently of claim validation.
+
+        findings += detect_evidence_conflicts(policy, evidence)
+
+        # Preserve existing trusted-claim conflict resolution and blocker checks.
         conflict_findings, suppressed = resolve_conflicts(policy, trusted)
         findings += conflict_findings
         findings += check_blockers(policy, trusted, suppressed)
+
         return self._result(policy, findings, now, retries_used)
 
     @staticmethod
@@ -383,4 +423,3 @@ def evaluate_handoff(claims: Any = None, evidence: Any = None,
     return Evaluator(policy_path, clock, raise_on_retry=raise_on_retry).evaluate(
         claims=claims, evidence=evidence, source_statuses=source_statuses,
         retries_used=retries_used, evidence_bundle=evidence_bundle, context=context)
-

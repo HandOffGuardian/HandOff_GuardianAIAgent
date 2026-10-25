@@ -1,46 +1,219 @@
-import streamlit as st
+
+"""Handoff Guardian — Streamlit dashboard."""
+
+from __future__ import annotations
+
+import json
 import os
 import sys
+from pathlib import Path
 
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../..')))
-from src.reporter.report_generator import ReportGenerator
+import streamlit as st
 
-st.set_page_config(page_title="Handoff Guardian Dashboard", layout="wide")
-st.title("🛡️ Handoff Guardian")
-st.subheader("Sales-to-Support Handoff Risk Auditor")
+from collections.abc import Mapping
+from dataclasses import asdict, is_dataclass
+from enum import Enum
+from datetime import date, datetime
 
-account_id = st.selectbox("Select Test Account",
-                          ["acct_101 (Clean)", "acct_104 (Failing Integration)", "acct_108 (Missing Data)"])
+# Ensure imports work when launched from the repository root.
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
-if st.button("🚀 Investigate Handoff", type="primary"):
-    with st.spinner("Running AI investigation pipeline..."):
-        is_failing = "104" in account_id
-        eval_result = {
-            "account_id": account_id.split()[0],
-            "decision": "ESCALATE" if is_failing else "CLEAR",
-            "risk_score": 85 if is_failing else 12,
-            "confidence": 0.95,
-            "conflicts": [{"claim_a": "CRM ready", "claim_b": "Ticket failing",
-                           "evidence_ids": ["CRM-7", "T-22"]}] if is_failing else []
-        }
-        reporter = ReportGenerator()
-        report = reporter.generate(eval_result)
+from src.controller.orchestrator import Orchestrator
+from src.evaluator import EvaluatorAdapter
+from src.evidence.agent import EvidenceAgent
+from src.evidence.providers.mock_provider import MockEvidenceProvider
+from src.extractor.claim_extractor import ClaimExtractor
+from src.reporter.report import Reporter
+
+
+st.set_page_config(
+    page_title="Handoff Guardian",
+    page_icon="🛡️",
+    layout="wide",
+)
+
+# ---------- Theme ----------
+if "theme" not in st.session_state:
+    st.session_state.theme = "Dark"
+
+with st.sidebar:
+    st.title("🛡️ Handoff Guardian")
+    st.caption("Sales-to-Support Handoff Risk Auditor")
+
+    st.selectbox(
+        "Appearance",
+        ["Dark", "Light"],
+        key="theme",
+    )
 
     st.divider()
-    status = report["status"]
-    if status == "CLEAR":
-        st.success(f"### Status: {status} (Risk Score: {report['risk_score']}/100)")
-    else:
-        st.error(f"### Status: {status} (Risk Score: {report['risk_score']}/100)")
+    page = st.radio(
+        "Navigation",
+        ["Investigate", "About"],
+        label_visibility="collapsed",
+    )
 
-    st.markdown("### 📝 Investigation Summary")
-    st.write(report["summary"])
+if st.session_state.theme == "Dark":
+    background = "#0E1117"
+    foreground = "#FAFAFA"
+    panel = "#1B2029"
+    border = "#303744"
+else:
+    background = "#FFFFFF"
+    foreground = "#202938"
+    panel = "#F3F6FA"
+    border = "#D8DEE8"
 
-    if report["conflicts"]:
-        st.markdown("### ⚠️ Detected Conflicts")
-        for conflict in report["conflicts"]:
-            st.error(f"**Conflict:** {conflict['claim_a']} vs {conflict['claim_b']}")
+st.markdown(
+    f"""
+    <style>
+    .stApp {{
+        background-color: {background};
+        color: {foreground};
+    }}
+    [data-testid="stSidebar"] {{
+        background-color: {panel};
+    }}
+    [data-testid="stMetric"] {{
+        background-color: {panel};
+        border: 1px solid {border};
+        padding: 16px;
+        border-radius: 12px;
+    }}
+    div.stButton > button[kind="primary"] {{
+        border-radius: 8px;
+        min-height: 44px;
+        font-weight: 600;
+    }}
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-    st.markdown("### 💡 Recommended Actions")
-    for rec in report["recommendations"]:
-        st.write(f"- {rec}")
+
+def build_orchestrator() -> Orchestrator:
+    """Build the pipeline using the existing project components."""
+    return Orchestrator(
+        claim_extractor=ClaimExtractor(),
+        evidence_agent=EvidenceAgent(MockEvidenceProvider()),
+        evaluator=EvaluatorAdapter(),
+        reporter=Reporter(),
+    )
+
+
+
+def json_safe(value):
+    """Convert nested pipeline results into JSON-compatible values."""
+    if isinstance(value, Mapping):
+        return {
+            str(key): json_safe(item)
+            for key, item in value.items()
+        }
+
+    if is_dataclass(value) and not isinstance(value, type):
+        return json_safe(asdict(value))
+
+    if isinstance(value, Enum):
+        return json_safe(value.value)
+
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+
+    if isinstance(value, (list, tuple)):
+        return [json_safe(item) for item in value]
+
+    if isinstance(value, (set, frozenset)):
+        return [json_safe(item) for item in value]
+
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+
+    # Avoid silently flattening unexpected objects into strings.
+    raise TypeError(
+        f"Unsupported result value for JSON serialization: "
+        f"{type(value).__name__}"
+    )
+
+# ---------- Main pages ----------
+
+st.title("🛡️ Handoff Guardian")
+st.caption("Sales-to-Support Handoff Risk Auditor")
+
+if page == "Investigate":
+    st.header("Investigate a Handoff")
+    st.write(
+        "Review a sales-to-support handoff using the existing "
+        "claim extraction, evidence collection, evaluation, and reporting pipeline."
+    )
+
+    with st.form("investigate_handoff"):
+        handoff_id = st.text_input(
+            "Handoff / Account ID",
+            placeholder="e.g. ACC001",
+        )
+        account_id = st.text_input(
+            "Account ID",
+            placeholder="e.g. ACC001",
+        )
+        handoff_message = st.text_area(
+            "Handoff message",
+            placeholder="Paste the handoff notes or message here...",
+            height=180,
+        )
+        submitted = st.form_submit_button(
+            "Investigate Handoff",
+            type="primary",
+            use_container_width=True,
+        )
+
+    if submitted:
+        if not (handoff_id.strip() or account_id.strip()):
+            st.warning("Please enter a handoff ID or account ID.")
+        elif not handoff_message.strip():
+            st.warning("Please enter a handoff message before investigating.")
+        else:
+            try:
+                with st.spinner("Running the investigation pipeline..."):
+                    orchestrator = build_orchestrator()
+
+                    # Keep the invocation explicit so we can adapt it to
+                    # the actual Orchestrator API if its signature differs.
+                    result = orchestrator.run(
+                        {
+                            "handoff_id": handoff_id.strip() or account_id.strip(),
+                            "account_id": account_id.strip() or handoff_id.strip(),
+                            "source_text": handoff_message.strip(),
+                        }
+                    )
+
+
+                    st.session_state["last_result"] = json_safe(result)
+
+            except Exception as exc:
+                st.error(f"Investigation failed: {exc}")
+
+    result = st.session_state.get("last_result")
+    if result is not None:
+        st.divider()
+        st.subheader("Investigation Results")
+        st.json(result)
+
+elif page == "About":
+    st.header("About Handoff Guardian")
+    st.write(
+        "Handoff Guardian helps identify risks in sales-to-support handoffs "
+        "by extracting claims, gathering evidence, evaluating requirements, "
+        "and generating a report."
+    )
+
+    st.subheader("How the pipeline works")
+    st.markdown(
+        """
+        1. **Claim Extractor** — extracts claims from the handoff.
+        2. **Evidence Agent** — gathers supporting evidence.
+        3. **Evaluator** — checks evidence and identifies risks.
+        4. **Reporter** — summarizes the findings and recommended actions.
+        """
+    )

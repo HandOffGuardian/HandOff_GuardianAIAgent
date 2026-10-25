@@ -44,6 +44,30 @@ def normalize_source_name(source: str) -> str:
     return SOURCE_ALIASES.get(clean, clean)
 
 
+CATEGORY_ALIASES: dict[str, str] = {
+    "engineering_status": "engineering_status",
+    "production_status": "engineering_status",
+    "blocker_status": "engineering_status",
+    "ownership": "ownership",
+    "primary_contact": "ownership",
+    "account_handler": "ownership",
+}
+
+
+def normalize_category(category: Any, key: Any = None) -> str:
+    """Map known evidence fields and claim keys to policy categories."""
+    raw_category = str(category).strip().lower() if category is not None else ""
+    raw_key = str(key).strip().lower() if key is not None else ""
+
+    if raw_category in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[raw_category]
+
+    if raw_key in CATEGORY_ALIASES:
+        return CATEGORY_ALIASES[raw_key]
+
+    return raw_category or raw_key or "unknown"
+
+
 def adapt_claim(raw: Any) -> Claim:
     """Adapt a raw dictionary or ContractClaim into an internal Claim model."""
     if isinstance(raw, Claim):
@@ -63,8 +87,11 @@ def adapt_claim(raw: Any) -> Claim:
         claim_id = raw.get("claim_id")
         key = raw.get("key") or raw.get("field")
         val = raw.get("value") if raw.get("value") is not None else raw.get("claimed_value")
-        category = raw.get("category") or "engineering_status"
-        validation_status = raw.get("validation_status") or "validated"
+        category = normalize_category(
+            raw.get("category"),
+            raw.get("key") or raw.get("field"),
+        )
+        validation_status = raw.get("validation_status") or "unvalidated"
         evidence_ids = raw.get("evidence_ids")
         if evidence_ids is None:
             raw_single = raw.get("evidence_id")
@@ -97,29 +124,183 @@ def adapt_evidence(raw: Any) -> EvidenceRecord:
     """Adapt a raw dictionary or ContractEvidence into an internal EvidenceRecord."""
     if isinstance(raw, EvidenceRecord):
         return raw
+
     if isinstance(raw, ContractEvidence):
-        ts = raw.updated_at
         return EvidenceRecord(
             evidence_id=raw.evidence_id,
             source=normalize_source_name(raw.source),
-            category="engineering_status",  # default requirement category
-            timestamp=ts,
+            category=normalize_category(raw.field),
+            timestamp=raw.updated_at,
+            value=str(raw.value) if raw.value is not None else None,
+            account_id=getattr(raw, "account_id", None),
+            excerpt=getattr(raw, "excerpt", None),
+            field=raw.field,
         )
+
     if isinstance(raw, Mapping):
         evidence_id = raw.get("evidence_id")
         raw_source = raw.get("source") or raw.get("source_id") or ""
+        raw_field = raw.get("field")
         norm_source = normalize_source_name(str(raw_source))
-        category = raw.get("category") or "engineering_status"
-        # Support updated_at from shared contract, falling back to timestamp
-        ts = raw.get("updated_at") if raw.get("updated_at") is not None else raw.get("timestamp")
+
+        category = normalize_category(
+            raw.get("category"),
+            raw.get("field"),
+        )
+
+        # Support updated_at from the shared contract, falling back to timestamp.
+        ts = (
+            raw.get("updated_at")
+            if raw.get("updated_at") is not None
+            else raw.get("timestamp")
+        )
+
+        value = raw.get("value")
+        account_id = raw.get("account_id")
+        excerpt = raw.get("excerpt")
+
         return EvidenceRecord(
             evidence_id=str(evidence_id) if evidence_id is not None else "",
             source=norm_source,
             category=str(category),
             timestamp=ts,
+            value=str(value) if value is not None else None,
+            account_id=str(account_id) if account_id is not None else None,
+            excerpt=str(excerpt) if excerpt is not None else None,
+            field=str(raw_field) if raw_field is not None else None,
         )
+
     return raw
 
+def _normalise_claim_value(value: Any) -> str:
+    """Normalize a value for conservative, case-insensitive comparison."""
+    return " ".join(str(value).strip().casefold().split()) if value is not None else ""
+
+
+def _claim_evidence_matches(claim: Claim, evidence: EvidenceRecord) -> bool:
+    """Return True only when evidence matches the claim's category, key, and value."""
+    if not evidence.evidence_id or not evidence.value:
+        return False
+
+    if not evidence.account_id:
+        return False
+
+    claim_category = normalize_category(claim.category, claim.key)
+    evidence_category = normalize_category(evidence.category)
+
+    if claim_category != evidence_category:
+        return False
+
+    # The evidence field must identify the same fact as the claim key.
+    claim_key = str(claim.key).strip().casefold()
+    evidence_key = (
+        str(evidence.field).strip().casefold()
+        if evidence.field is not None
+        else str(evidence.category).strip().casefold()
+    )
+    aliases = {
+        "blocker_status": {"blocker_status", "engineering_status", "production_status"},
+        "engineering_status": {"blocker_status", "engineering_status", "production_status"},
+        "production_status": {"blocker_status", "engineering_status", "production_status"},
+        "ownership": {"ownership"},
+        "primary_contact": {"primary_contact"},
+        "account_handler": {"account_handler"},
+        "implementation_owner": {"implementation_owner"},
+    }
+
+    compatible_keys = aliases.get(claim_key, {claim_key})
+    if evidence_key not in compatible_keys:
+        return False
+
+    return _normalise_claim_value(claim.value) == _normalise_claim_value(evidence.value)
+
+
+def validate_claims_against_evidence(
+    claims: list[Claim],
+    evidence: list[EvidenceRecord],
+    account_id: str,
+) -> list[Claim]:
+    """Attach supporting evidence IDs only when support is unambiguous."""
+    validated: list[Claim] = []
+
+    for claim in claims:
+        # Never trust pre-existing references without rechecking them.
+        matching = [
+            record
+            for record in evidence
+            if record.account_id == account_id
+            and _claim_evidence_matches(claim, record)
+        ]
+
+        # Only records matching this specific claim key can establish
+        # whether the claim has contradictory supporting evidence.
+        claim_key = str(claim.key).strip().casefold()
+
+        key_aliases = {
+            "blocker_status": {
+                "blocker_status",
+                "engineering_status",
+                "production_status",
+            },
+            "engineering_status": {
+                "blocker_status",
+                "engineering_status",
+                "production_status",
+            },
+            "production_status": {
+                "blocker_status",
+                "engineering_status",
+                "production_status",
+            },
+            "ownership": {"ownership"},
+            "primary_contact": {"primary_contact"},
+            "account_handler": {"account_handler"},
+            "implementation_owner": {"implementation_owner"},
+        }
+
+        compatible_keys = key_aliases.get(claim_key, {claim_key})
+
+        relevant_values = {
+            _normalise_claim_value(record.value)
+            for record in evidence
+            if record.account_id == account_id
+            and record.value is not None
+            and (
+                str(record.field).strip().casefold()
+                if record.field is not None
+                else str(record.category).strip().casefold()
+            ) in compatible_keys
+        }
+
+        if len(relevant_values) > 1 or not matching:
+            validated.append(
+                Claim(
+                    claim_id=claim.claim_id,
+                    category=claim.category,
+                    key=claim.key,
+                    value=claim.value,
+                    validation_status="unvalidated",
+                    evidence_ids=(),
+                    source=claim.source,
+                    severity=claim.severity,
+                )
+            )
+            continue
+
+        validated.append(
+            Claim(
+                claim_id=claim.claim_id,
+                category=claim.category,
+                key=claim.key,
+                value=claim.value,
+                validation_status="validated",
+                evidence_ids=tuple(record.evidence_id for record in matching),
+                source=claim.source,
+                severity=claim.severity,
+            )
+        )
+
+    return validated
 
 def adapt_status(raw: Any) -> SourceStatus:
     """Adapt a raw dictionary or SourceStatus model."""
@@ -220,6 +401,35 @@ class EvaluatorAdapter:
         adapted_evidence: Optional[list[EvidenceRecord]] = None
         if isinstance(evidence, (list, tuple)):
             adapted_evidence = [adapt_evidence(e) for e in evidence]
+         # Validate claims against evidence for this account before evaluation.
+        if adapted_claims is not None and adapted_evidence is not None:
+            account_id = (
+                context.get("account_id")
+                if isinstance(context, Mapping)
+                else None
+            )
+
+            if isinstance(account_id, str) and account_id.strip():
+                adapted_claims = validate_claims_against_evidence(
+                    claims=adapted_claims,
+                    evidence=adapted_evidence,
+                    account_id=account_id,
+                )
+            else:
+                # Fail closed if the account context is missing.
+                adapted_claims = [
+                    Claim(
+                        claim_id=claim.claim_id,
+                        category=claim.category,
+                        key=claim.key,
+                        value=claim.value,
+                        validation_status="unvalidated",
+                        evidence_ids=(),
+                        source=claim.source,
+                        severity=claim.severity,
+                    )
+                    for claim in adapted_claims
+                ]
 
         # Adapt statuses
         adapted_statuses: Optional[list[SourceStatus]] = None

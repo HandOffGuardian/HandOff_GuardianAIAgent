@@ -26,11 +26,19 @@ class Decision(str, Enum):
 
 @dataclass(frozen=True)
 class EvidenceRecord:
+    """Normalized evidence used by the Evaluator.
+
+    Preserve source provenance and original record content so validation
+    and conflict detection can inspect the evidence itself.
+    """
     evidence_id: str
     source: str
     category: str
-    timestamp: Union[datetime, str, None]  # timezone-aware datetime or ISO-8601
-
+    timestamp: Union[datetime, str, None]
+    value: Optional[str] = None
+    account_id: Optional[str] = None
+    excerpt: Optional[str] = None
+    field: Optional[str] = None
 
 @dataclass(frozen=True)
 class Claim:

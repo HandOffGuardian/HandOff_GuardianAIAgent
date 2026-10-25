@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
+from src.evaluator.adapter import adapt_claim, adapt_evidence, validate_claims_against_evidence
 
 
 class Orchestrator:
@@ -114,6 +115,29 @@ class Orchestrator:
 
         evidence = evidence_response["evidence"]
         result["evidence"] = evidence  # retain evidence records and provenance as returned
+        # Validate extracted claims against evidence for this account.
+        try:
+            validated_claims = validate_claims_against_evidence(
+                claims=[adapt_claim(claim) for claim in claims],
+                evidence=[adapt_evidence(item) for item in evidence],
+                account_id=request["account_id"],
+            )
+
+            result["claims"] = [
+                {
+                    **dict(original),
+                    "category": validated.category,
+                    "validation_status": validated.validation_status,
+                    "evidence_ids": validated.evidence_ids,
+                }
+                for original, validated in zip(claims, validated_claims)
+            ]
+        except (TypeError, ValueError, KeyError):
+            result["diagnostics"].append({
+                "component": "evaluator",
+                "error": "claim_validation_failed",
+            })
+            return self._report(result)
         missing = evidence_response.get("missing_mandatory", [])
         conflicts = evidence_response.get("conflicts", [])
         evidence_mandatory_satisfied = evidence_response.get("mandatory_satisfied")
@@ -167,6 +191,8 @@ class Orchestrator:
             and evidence_mandatory_satisfied is not False
         )
         no_conflicts = not conflicts and not evaluator_conflicts
+
+
         if (
             evaluation_response.get("decision") == "CLEAR"
             and mandatory_satisfied is True
