@@ -5,3 +5,4 @@ streamlit
 requests
 python-dotenv
 pydantic
+openai
