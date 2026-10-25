@@ -1,4 +1,5 @@
 """Evaluator package."""
+from .adapter import EvaluatorAdapter
 from .evaluator import Evaluator, evaluate_handoff
 from .models import (
     Claim,
@@ -13,6 +14,7 @@ from .policy import Policy, PolicyError, load_policy
 
 __all__ = [
     "Evaluator",
+    "EvaluatorAdapter",
     "evaluate_handoff",
     "Decision",
     "Claim",
@@ -25,3 +27,4 @@ __all__ = [
     "PolicyError",
     "load_policy",
 ]
+

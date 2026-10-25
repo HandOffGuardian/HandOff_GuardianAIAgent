@@ -129,7 +129,7 @@ def validate_policy(raw: Any) -> Policy:
     weights: Dict[str, float] = {}
     for name, cfg in severities.items():
         _req(isinstance(cfg, dict) and "weight" in cfg, f"severity '{name}' needs a weight")
-        weights[str(name)] = _number(cfg["weight"], f"severities.{name}.weight")
+        weights[name] = _number(cfg["weight"], f"severities.{name}.weight")
 
     codes: Dict[str, ReasonCode] = {}
     for code, cfg in _mapping(raw["reason_codes"], "reason_codes").items():
@@ -139,7 +139,7 @@ def validate_policy(raw: Any) -> Policy:
         _req(isinstance(cfg.get("blocking"), bool), f"reason code '{code}' needs boolean 'blocking'")
         _req(isinstance(cfg.get("description"), str) and bool(cfg["description"]),
              f"reason code '{code}' needs a description")
-        codes[str(code)] = ReasonCode(str(code), cfg["severity"], cfg["blocking"], cfg["description"])
+        codes[code] = ReasonCode(code, cfg["severity"], cfg["blocking"], cfg["description"])
     missing = REQUIRED_REASON_CODES - set(codes)
     _req(not missing, f"policy lacks reason codes: {sorted(missing)}")
     unknown = set(codes) - REQUIRED_REASON_CODES
@@ -166,7 +166,7 @@ def validate_policy(raw: Any) -> Policy:
     precedence: Dict[str, Tuple[str, ...]] = {}
     for cat, srcs in _mapping(raw["source_precedence"], "source_precedence").items():
         _req(cat in categories, f"source_precedence category '{cat}' matches no requirement")
-        precedence[str(cat)] = _str_list(srcs, f"source_precedence.{cat}")
+        precedence[cat] = _str_list(srcs, f"source_precedence.{cat}")
 
     b = _mapping(raw["blockers"], "blockers")
     for k in ("category", "claim_key", "open_values", "resolved_values",
@@ -192,10 +192,10 @@ def validate_policy(raw: Any) -> Policy:
     for status, action in _mapping(raw["source_status_behavior"], "source_status_behavior").items():
         if action == "pass":
             _req(status == "available", "only status 'available' may map to 'pass'")
-            behavior[str(status)] = None
+            behavior[status] = None
         else:
             _req(action in codes, f"source_status_behavior.{status} uses unknown reason code {action!r}")
-            behavior[str(status)] = action
+            behavior[status] = action
     _req(behavior.get("available", "x") is None, "status 'available' must map to 'pass'")
     _req(raw["missing_source_status_code"] in codes, "missing_source_status_code is not a known reason code")
 
@@ -206,7 +206,7 @@ def validate_policy(raw: Any) -> Policy:
     floor = int(_number(s["blocking_floor"], "scoring.blocking_floor"))
     _req(floor <= max_score, "scoring.blocking_floor exceeds max_score")
     levels = _mapping(s["levels"], "scoring.levels")
-    ordered = tuple(sorted(((str(n), int(_number(v, f"scoring.levels.{n}"))) for n, v in levels.items()),
+    ordered = tuple(sorted(((n, int(_number(v, f"scoring.levels.{n}"))) for n, v in levels.items()),
                            key=lambda x: x[1]))
     _req(len(ordered) >= 2 and ordered[0][1] == 0, "scoring.levels needs >=2 levels starting at 0")
     _req(len({v for _, v in ordered}) == len(ordered), "scoring.levels bounds must be distinct")

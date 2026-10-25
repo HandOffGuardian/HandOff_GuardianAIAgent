@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable, List, Optional, Sequence, Set
 
+from src.contracts.finding import Finding as ContractFinding
 from .models import (Claim, Decision, EvaluationResult, EvaluatorTransientError,
                      EvidenceRecord, Finding, SourceStatus)
 from .policy import Policy, PolicyError, load_policy
@@ -22,6 +23,25 @@ from .rules import (check_blockers, check_claims, check_evidence,
 
 Clock = Callable[[], datetime]
 
+SOURCE_ALIASES: dict[str, str] = {
+    "engineering ticket": "jira",
+    "engineering_ticket": "jira",
+    "jira": "jira",
+    "crm": "crm",
+    "github": "github",
+    "chat": "chat",
+    "onboarding project": "onboarding_project",
+    "onboarding_project": "onboarding_project",
+}
+
+
+def normalize_source_name(source: str) -> str:
+    """Normalize source names (e.g., 'Engineering Ticket' -> 'jira', 'CRM' -> 'crm')."""
+    if not source:
+        return ""
+    clean = source.strip().lower()
+    return SOURCE_ALIASES.get(clean, clean)
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -30,6 +50,18 @@ def _utc_now() -> datetime:
 def _normalize_claim(c: Any) -> Any:
     if isinstance(c, Claim):
         return c
+    if hasattr(c, "claim_id") and hasattr(c, "category") and hasattr(c, "key") and hasattr(c, "value"):
+        # Shared ContractClaim object
+        return Claim(
+            claim_id=str(c.claim_id),
+            category=str(c.category),
+            key=str(c.key),
+            value=str(c.value),
+            validation_status=str(getattr(c, "validation_status", "validated")),
+            evidence_ids=tuple(getattr(c, "evidence_ids", ())),
+            source=normalize_source_name(getattr(c, "source", None) or "") or None,
+            severity=str(c.severity) if getattr(c, "severity", None) is not None else None,
+        )
     if isinstance(c, Mapping):
         claim_id = c.get("claim_id")
         key = c.get("key") or c.get("field")
@@ -46,6 +78,10 @@ def _normalize_claim(c: Any) -> Any:
             evidence_ids = tuple(str(x) for x in raw_ev if x is not None)
         else:
             evidence_ids = ()
+
+        raw_source = c.get("source")
+        norm_source = normalize_source_name(str(raw_source)) if raw_source is not None else None
+
         return Claim(
             claim_id=str(claim_id) if claim_id is not None else "",
             category=str(category),
@@ -53,7 +89,7 @@ def _normalize_claim(c: Any) -> Any:
             value=str(val) if val is not None else "",
             validation_status=str(validation_status),
             evidence_ids=evidence_ids,
-            source=str(c["source"]) if c.get("source") is not None else None,
+            source=norm_source,
             severity=str(c["severity"]) if c.get("severity") is not None else None,
         )
     return c
@@ -62,14 +98,26 @@ def _normalize_claim(c: Any) -> Any:
 def _normalize_evidence(e: Any) -> Any:
     if isinstance(e, EvidenceRecord):
         return e
+    if hasattr(e, "updated_at") and hasattr(e, "evidence_id"):
+        # Shared ContractEvidence object
+        ts = e.updated_at
+        src = normalize_source_name(getattr(e, "source", ""))
+        return EvidenceRecord(
+            evidence_id=str(e.evidence_id),
+            source=src,
+            category="engineering_status",
+            timestamp=ts,
+        )
     if isinstance(e, Mapping):
         evidence_id = e.get("evidence_id")
-        source = e.get("source") or e.get("source_id")
+        raw_source = e.get("source") or e.get("source_id") or ""
+        norm_source = normalize_source_name(str(raw_source))
         category = e.get("category") or "engineering_status"
-        ts = e.get("timestamp")
+        # Support updated_at from shared contract, falling back to timestamp
+        ts = e.get("updated_at") if e.get("updated_at") is not None else e.get("timestamp")
         return EvidenceRecord(
             evidence_id=str(evidence_id) if evidence_id is not None else "",
-            source=str(source) if source is not None else "",
+            source=norm_source,
             category=str(category),
             timestamp=ts,
         )
@@ -80,15 +128,32 @@ def _normalize_status(s: Any) -> Any:
     if isinstance(s, SourceStatus):
         return s
     if isinstance(s, Mapping):
-        source = s.get("source") or s.get("source_id")
+        raw_source = s.get("source") or s.get("source_id") or ""
+        norm_source = normalize_source_name(str(raw_source))
         status = s.get("status")
         detail = s.get("detail")
         return SourceStatus(
-            source=str(source) if source is not None else "",
+            source=norm_source,
             status=str(status) if status is not None else "",
             detail=str(detail) if detail is not None else None,
         )
     return s
+
+
+def to_contract_finding(f: Any) -> ContractFinding:
+    """Ensure finding conforms to the shared Finding contract."""
+    if isinstance(f, ContractFinding):
+        return f
+    return ContractFinding(
+        reason_code=f.reason_code,
+        rule_id=f.rule_id,
+        severity=f.severity,
+        blocking=f.blocking,
+        description=f.description,
+        evidence_ids=tuple(str(x) for x in f.evidence_ids),
+        subject=f.subject or "",
+        retryable=f.retryable,
+    )
 
 
 def _validate_inputs(claims: object, evidence: object, statuses: object) -> List[str]:
@@ -163,8 +228,22 @@ class Evaluator:
             if evidence is None:
                 evidence = evidence_bundle.get("evidence", [])
             if source_statuses is None:
-                source_statuses = evidence_bundle.get("source_statuses", evidence_bundle.get("statuses", []))
-
+                bundle_statuses = evidence_bundle.get("source_statuses") or evidence_bundle.get("statuses")
+                if bundle_statuses is not None:
+                    source_statuses = bundle_statuses
+                else:
+                    # Infer available statuses for sources present in collected evidence
+                    inferred_sources: set[str] = set()
+                    for item in evidence or []:
+                        raw_src = getattr(item, "source", None)
+                        if raw_src is None and isinstance(item, Mapping):
+                            raw_src = item.get("source") or item.get("source_id")
+                        if raw_src:
+                            inferred_sources.add(normalize_source_name(str(raw_src)))
+                    source_statuses = [
+                        SourceStatus(source=s, status="available")
+                        for s in sorted(inferred_sources)
+                    ]
 
         # Normalize dicts if passed
         if isinstance(claims, (list, tuple)):
@@ -263,11 +342,12 @@ class Evaluator:
             f.blocking for f in ordered_t
             if f.reason_code in ("MISSING_REQUIRED_EVIDENCE", "MISSING_REQUIRED_CLAIM", "SOURCE_STATUS_MISSING")
         ))
+        contract_findings = tuple(to_contract_finding(f) for f in ordered_t)
         return EvaluationResult(
             decision,
             score,
             level,
-            ordered_t,
+            contract_findings,
             policy.version,
             now.isoformat(),
             missing_mandatory=tuple(missing_mandatory),
@@ -278,7 +358,7 @@ class Evaluator:
 
 def _fail_closed(code: str, description: str, now: datetime) -> EvaluationResult:
     """ESCALATE result used when no valid policy is available to classify findings."""
-    finding = Finding(code, "POLICY", "critical", True, description, (), code)
+    finding = to_contract_finding(Finding(code, "POLICY", "critical", True, description, (), code))
     return EvaluationResult(
         Decision.ESCALATE,
         100,

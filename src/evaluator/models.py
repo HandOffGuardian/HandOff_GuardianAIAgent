@@ -70,11 +70,11 @@ from typing import Any, Iterator, Optional, Tuple, Union
 class EvaluatorTransientError(RuntimeError):
     """Raised when evaluation encounters temporary, retryable conditions (transient/safe to retry)."""
 
-    def __init__(self, message: str, findings: Tuple[Finding, ...] = ()) -> None:
+    def __init__(self, message: str, findings: Tuple[Any, ...] = ()) -> None:
         super().__init__(message)
         self.transient: bool = True
         self.safe_to_retry: bool = True
-        self.findings: Tuple[Finding, ...] = findings
+        self.findings: Tuple[Any, ...] = findings
 
 
 @dataclass(frozen=True)
@@ -82,7 +82,7 @@ class EvaluationResult(Mapping):
     decision: Decision
     risk_score: int
     risk_level: str
-    findings: Tuple[Finding, ...] = field(default_factory=tuple)
+    findings: Tuple[Any, ...] = field(default_factory=tuple)
     policy_version: Optional[str] = None
     evaluated_at: Optional[str] = None
     missing_mandatory: Tuple[str, ...] = field(default_factory=tuple)
