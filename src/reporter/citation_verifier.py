@@ -7,19 +7,35 @@ Purpose: Ensure all evidence citations in the final report tie back to actual so
 class CitationVerifier:
     @staticmethod
     def verify_citations(report: dict, evidence_bundle: dict) -> bool:
-        """
-        Validates that all evidence IDs cited in conflicts exist in the retrieved evidence bundle.
-        """
-        if not evidence_bundle or "records" not in evidence_bundle:
-            return True
+        """Return whether every report citation points to a collected record.
 
-        valid_record_ids = {rec.get("record_id") for rec in evidence_bundle.get("records", [])}
-        conflicts = report.get("conflicts", [])
-
-        for conflict in conflicts:
-            cited_ids = conflict.get("evidence_ids", [])
-            for cid in cited_ids:
-                if cid not in valid_record_ids:
+        The current repository contract uses ``evidence`` and ``evidence_id``;
+        the legacy fixture contract used ``records`` and ``record_id``. Both
+        are accepted, while malformed or absent bundles fail closed.
+        """
+        if not isinstance(report, dict) or not isinstance(evidence_bundle, dict):
+            return False
+        records = evidence_bundle.get("evidence", evidence_bundle.get("records"))
+        if not isinstance(records, list):
+            return False
+        valid_ids = {
+            record.get("evidence_id", record.get("record_id"))
+            for record in records
+            if isinstance(record, dict)
+        }
+        raw_cited_ids = report.get("evidence_ids", [])
+        if not isinstance(raw_cited_ids, list):
+            return False
+        cited_ids = list(raw_cited_ids)
+        for key in ("conflicts", "findings"):
+            items = report.get(key, [])
+            if not isinstance(items, list):
+                return False
+            for item in items:
+                if not isinstance(item, dict):
                     return False
-
-        return True
+                refs = item.get("evidence_ids", [])
+                if not isinstance(refs, (list, tuple)):
+                    return False
+                cited_ids.extend(refs)
+        return all(isinstance(evidence_id, str) and evidence_id in valid_ids for evidence_id in cited_ids)
