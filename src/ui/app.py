@@ -22,20 +22,41 @@ if str(ROOT) not in sys.path:
 
 from src.controller.application import build_orchestrator
 
+from src.ui import components as ui
+from src.ui.theme import inject_theme
+from src.ui.view_model import STAGES, evidence_citations, stage_states, summary_facts
+
 
 st.set_page_config(
-    page_title="Handoff Guardian",
+    page_title="Handoff Guardian AI",
     page_icon="🛡️",
     layout="wide",
 )
+
+
+def nemotron_configured() -> bool:
+    """Report whether the Nemotron variables are present (values never shown)."""
+    names = ("NVIDIA_API_KEY", "NVIDIA_BASE_URL", "NEMOTRON_MODEL")
+    file_values: Mapping[str, str | None] = {}
+    try:
+        from dotenv import dotenv_values
+
+        env_path = ROOT / ".env"
+        if env_path.is_file():
+            file_values = dotenv_values(env_path)
+    except Exception:
+        file_values = {}
+    return all((os.environ.get(n) or file_values.get(n) or "").strip() for n in names)
+
 
 # ---------- Theme ----------
 if "theme" not in st.session_state:
     st.session_state.theme = "Dark"
 
+model_ready = nemotron_configured()
+
 with st.sidebar:
-    st.title("🛡️ Handoff Guardian")
-    st.caption("Sales-to-Support Handoff Risk Auditor")
+    ui.sidebar_brand()
 
     st.selectbox(
         "Appearance",
@@ -50,42 +71,15 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
-if st.session_state.theme == "Dark":
-    background = "#0E1117"
-    foreground = "#FAFAFA"
-    panel = "#1B2029"
-    border = "#303744"
-else:
-    background = "#FFFFFF"
-    foreground = "#202938"
-    panel = "#F3F6FA"
-    border = "#D8DEE8"
+    st.divider()
+    ui.sidebar_status(
+        [
+            ("Nemotron LLM", "Ready" if model_ready else "Not Configured", "accent" if model_ready else "warn"),
+            ("Evidence Fixtures", "Active", "ok"),
+        ]
+    )
 
-st.markdown(
-    f"""
-    <style>
-    .stApp {{
-        background-color: {background};
-        color: {foreground};
-    }}
-    [data-testid="stSidebar"] {{
-        background-color: {panel};
-    }}
-    [data-testid="stMetric"] {{
-        background-color: {panel};
-        border: 1px solid {border};
-        padding: 16px;
-        border-radius: 12px;
-    }}
-    div.stButton > button[kind="primary"] {{
-        border-radius: 8px;
-        min-height: 44px;
-        font-weight: 600;
-    }}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+inject_theme(st.session_state.theme)
 
 
 def json_safe(value):
@@ -114,37 +108,126 @@ def json_safe(value):
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
 
-    # Avoid silently flattening unexpected objects into strings.
     raise TypeError(
         f"Unsupported result value for JSON serialization: "
         f"{type(value).__name__}"
     )
 
-# ---------- Main pages ----------
 
-st.title("🛡️ Handoff Guardian")
-st.caption("Sales-to-Support Handoff Risk Auditor")
+def render_result(result: Mapping) -> None:
+    """Render a JSON-safe Orchestrator result without altering its meaning."""
+    facts = summary_facts(result)
+    status = facts["disposition"]
+    evaluation = result.get("evaluation") or {}
+    report = result.get("report") or {}
+    score = facts["risk_score"]
+    score_text = f"{score}/100" if score is not None else "n/a"
 
-if page == "Investigate":
-    st.header("Investigate a Handoff")
-    st.write(
-        "Review a sales-to-support handoff using the existing "
-        "claim extraction, evidence collection, evaluation, and reporting pipeline."
+    ui.section("Outcome", "Investigation Result")
+    ui.hero(facts)
+
+    if status == "CLEAR":
+        ui.alert_marker("ok")
+        st.success(f"Status: {status} (Risk Score: {score_text})")
+    else:
+        ui.alert_marker("bad")
+        st.error(f"Status: {status} (Risk Score: {score_text})")
+
+    ui.section("Workflow", "Multi-Agent Pipeline")
+    ui.pipeline(stage_states(result))
+
+    claims = result.get("claims") or []
+    evidence = result.get("evidence") or []
+    findings = evaluation.get("findings", [])
+    diagnostics = result.get("diagnostics") or []
+    states = {s["key"]: s["status"] for s in stage_states(result)}
+
+    ui.section("Details", "Investigation Breakdown")
+    tabs = st.tabs(
+        [
+            "Report",
+            f"Findings ({len(findings)})",
+            f"Claims ({len(claims)})",
+            f"Evidence ({len(evidence)})",
+            f"Diagnostics ({len(diagnostics)})",
+            "Raw JSON",
+        ]
     )
 
+    with tabs[0]:
+        if report:
+            with st.container(border=True):
+                st.markdown(report.get("summary", "No report was produced."))
+        else:
+            ui.empty_state("No Report Produced", "The reporter produced no summary for this run.")
+        ui.text_list("Recommended Actions", report.get("recommendations", ["Perform manual review."]))
+
+    with tabs[1]:
+        if findings:
+            ui.findings_list(findings)
+        elif evaluation:
+            ui.empty_state("No Findings", "Zero policy findings recorded.")
+        else:
+            ui.empty_state("Not Evaluated", "Pipeline did not reach the evaluation stage.")
+        if evaluation.get("missing_mandatory"):
+            ui.text_list("Missing Mandatory Items", evaluation["missing_mandatory"])
+        if evaluation.get("conflicts"):
+            ui.text_list("Identified Conflicts", evaluation["conflicts"])
+
+    with tabs[2]:
+        if claims:
+            ui.claims_table(claims)
+        elif states.get("claim_extractor") in ("completed", "warning"):
+            ui.empty_state("No Claims", "No assertions detected in the provided handoff text.")
+        else:
+            ui.empty_state("Unavailable", "Claim extraction stage did not complete.")
+
+    with tabs[3]:
+        if evidence:
+            ui.evidence_grid(evidence, evidence_citations(result))
+        elif states.get("evidence_agent") in ("completed", "warning"):
+            ui.empty_state("No Records", "No evidence records found for this account.")
+        else:
+            ui.empty_state("Unavailable", "Evidence retrieval stage did not complete.")
+
+    with tabs[4]:
+        if diagnostics:
+            ui.diagnostics_table(diagnostics)
+        else:
+            ui.empty_state("Clean Execution", "No errors or diagnostics were generated.")
+
+    with tabs[5]:
+        st.download_button(
+            "Download Result (JSON)",
+            data=json.dumps(result, indent=2),
+            file_name=f"handoff-guardian-{result.get('handoff_id') or 'result'}.json",
+            mime="application/json",
+        )
+        st.json(result)
+
+
+# ---------- Main pages ----------
+
+if page == "Investigate":
+    ui.topbar("Handoff Risk Auditor")
+    ui.intro_card()
+
     with st.form("investigate_handoff"):
-        handoff_id = st.text_input(
-            "Handoff / Account ID",
-            placeholder="e.g. ACC001",
-        )
-        account_id = st.text_input(
-            "Account ID",
-            placeholder="e.g. ACC001",
-        )
+        id_col, account_col = st.columns(2)
+        with id_col:
+            handoff_id = st.text_input(
+                "Handoff ID",
+                placeholder="e.g. ACC001",
+            )
+        with account_col:
+            account_id = st.text_input(
+                "Account ID",
+                placeholder="e.g. ACC001",
+            )
         handoff_message = st.text_area(
             "Handoff message",
-            placeholder="Paste the handoff notes or message here...",
-            height=180,
+            placeholder="Paste handoff notes or message here...",
+            height=160,
         )
         submitted = st.form_submit_button(
             "Investigate Handoff",
@@ -152,14 +235,17 @@ if page == "Investigate":
             use_container_width=True,
         )
 
+    run_failed = False
     if submitted:
         if not (handoff_id.strip() or account_id.strip()):
+            ui.alert_marker("warn")
             st.warning("Please enter a handoff ID or account ID.")
         elif not handoff_message.strip():
+            ui.alert_marker("warn")
             st.warning("Please enter a handoff message before investigating.")
         else:
             try:
-                with st.spinner("Running the investigation pipeline..."):
+                with st.spinner("Analyzing handoff claims and validating evidence..."):
                     orchestrator = build_orchestrator()
 
                     result = orchestrator.run(
@@ -170,55 +256,53 @@ if page == "Investigate":
                         }
                     )
 
-
                     st.session_state["last_result"] = json_safe(result)
 
             except Exception as exc:
+                run_failed = True
+                ui.alert_marker("bad")
                 st.error(f"Investigation failed: {exc}")
 
     result = st.session_state.get("last_result")
     if result is not None:
-        st.divider()
-        st.subheader("Investigation Results")
-        status = result.get("disposition", "ESCALATE")
-        evaluation = result.get("evaluation") or {}
-        report = result.get("report") or {}
-        score = evaluation.get("risk_score", report.get("risk_score", 0))
-        if status == "CLEAR":
-            st.success(f"Status: {status} (Risk Score: {score}/100)")
-        else:
-            st.error(f"Status: {status} (Risk Score: {score}/100)")
-        st.markdown("### Investigation Summary")
-        st.write(report.get("summary", "No report was produced."))
-        findings = evaluation.get("findings", [])
-        if findings:
-            st.markdown("### Findings")
-            st.write(json_safe(findings))
-        if result.get("evidence"):
-            with st.expander("Collected evidence and provenance"):
-                st.json(json_safe(result["evidence"]))
-        if result.get("diagnostics"):
-            st.markdown("### Execution diagnostics")
-            for diagnostic in result["diagnostics"]:
-                st.warning(f"{diagnostic.get('component')}: {diagnostic.get('error')}")
-        st.markdown("### Recommended Actions")
-        for recommendation in report.get("recommendations", ["Perform manual review."]):
-            st.write(f"- {recommendation}")
+        render_result(result)
+    else:
+        ui.section("Workflow", "Multi-Agent Pipeline")
+        ui.pipeline(stage_states(None))
 
 elif page == "About":
-    st.header("About Handoff Guardian")
-    st.write(
-        "Handoff Guardian helps identify risks in sales-to-support handoffs "
-        "by extracting claims, gathering evidence, evaluating requirements, "
-        "and generating a report."
+    ui.topbar("System Architecture")
+
+    ui.section("Pipeline Architecture", "Multi-Agent Flow")
+    ui.about_stages(STAGES)
+
+    ui.section("Verification Policy", "Fail-Closed Standard")
+    ui.text_list(
+        "A handoff receives a CLEAR disposition only when:",
+        [
+            "Evaluator explicitly issues a CLEAR decision.",
+            "All mandatory policy requirements are satisfied.",
+            "Account evidence is complete with zero unresolved conflicts.",
+            "Any extraction, provider, or evaluation failure defaults to ESCALATE.",
+        ],
     )
 
-    st.subheader("How the pipeline works")
-    st.markdown(
-        """
-        1. **Claim Extractor** — extracts claims from the handoff.
-        2. **Evidence Agent** — gathers supporting evidence.
-        3. **Evaluator** — checks evidence and identifies risks.
-        4. **Reporter** — summarizes the findings and recommended actions.
-        """
+    ui.section("Service Integrations", "Environment Status")
+    ui.integration_table(
+        [
+            ("NVIDIA Nemotron", "Configured" if model_ready else "Not Configured", "accent" if model_ready else "warn",
+             "Powers LLM claim extraction via OpenAI-compatible endpoint."),
+            ("Evidence Provider", "Fixture Records", "ok",
+             "Supplies multi-source account records for offline evaluation."),
+            ("Zetaris Connector", "Unlinked", "", "Production adapter slot."),
+            ("Meterless LLM", "Offline", "", "Template report generation enabled."),
+        ]
     )
+
+# When launched via root `app.py` (`from src.ui.app import *`), Python's
+# module cache prevents Streamlit reruns from re-executing this file.
+# A deferred eviction allows importlib to finish its initial load cleanly,
+# while ensuring subsequent reruns of root `app.py` re-execute without blanking.
+if __name__ != "__main__":
+    import threading
+    threading.Timer(0.05, lambda: sys.modules.pop("src.ui.app", None)).start()
